@@ -66,34 +66,51 @@ exchange = ccxt.kucoin({"enableRateLimit": True})
 def fetch_interval(symbol, timeframe, since=None):
     """
     Fetch OHLCV data dari exchange dengan pagination.
-    Sudah include deduplikasi internal.
+    Akan terus fetch sampai SEMUA data dari 'since' sampai sekarang.
+    Jika since=None, fetch dari awal listing (bisa jutaan rows).
     """
     all_data = []
-    limit = 1500
+    limit = 1500  # Max per request dari KuCoin
     seen_timestamps = set()  # Track timestamp untuk hindari duplikat
+    batch_count = 0
 
+    print(f"   🔄 Starting fetch {timeframe}...")
+    
     while True:
         try:
             data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
         except Exception as e:
-            print(f"Error fetching {timeframe}: {e}")
+            print(f"   ❌ Error fetching {timeframe}: {e}")
             break
 
         if not data:
+            print(f"   📭 No more data for {timeframe}")
             break
 
+        batch_count += 1
+        
         # Filter duplikat saat fetch (layer 1)
+        new_in_batch = 0
         for candle in data:
             ts = candle[0]
             if ts not in seen_timestamps:
                 seen_timestamps.add(ts)
                 all_data.append(candle)
+                new_in_batch += 1
 
         last_timestamp = data[-1][0]
+        last_dt = datetime.utcfromtimestamp(last_timestamp / 1000)
+        
+        # Progress log setiap 10 batch
+        if batch_count % 10 == 0 or len(data) < limit:
+            print(f"   📦 {timeframe} Batch {batch_count}: +{new_in_batch} rows | Total: {len(all_data)} | Last: {last_dt}")
 
+        # Jika data yang didapat kurang dari limit, berarti sudah sampai akhir
         if len(data) < limit:
+            print(f"   ✅ {timeframe} COMPLETE: {batch_count} batches, {len(all_data)} total rows")
             break
 
+        # Update 'since' untuk fetch batch berikutnya
         since = last_timestamp + 1
         time.sleep(exchange.rateLimit / 1000)
 

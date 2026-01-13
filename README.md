@@ -10,7 +10,7 @@ Project ini mengambil data historis dan real-time harga Solana (SOL/USDT) dari e
 
 | Interval | Tabel BigQuery |
 | -------- | -------------- |
-| 5 menit  | SOL_5menit     |
+| 1 menit  | SOL_1menit     |
 | 15 menit | SOL_15menit    |
 | 1 jam    | SOL_1jam       |
 | 1 hari   | SOL_1hari      |
@@ -124,7 +124,7 @@ Script akan otomatis mendeteksi file JSON lokal jika environment variable tidak 
 
 Pastikan sudah membuat dataset `SOL` di BigQuery dengan tabel-tabel:
 
-- `SOL_5menit`
+- `SOL_1menit`
 - `SOL_15menit`
 - `SOL_1jam`
 - `SOL_1hari`
