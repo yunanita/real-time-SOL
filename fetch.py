@@ -46,7 +46,7 @@ dataset_id = "SOL"
 
 # Mapping interval ke nama tabel BigQuery
 interval_table_map = {
-    "5m": "SOL_5menit",
+    "1m": "SOL_1menit",
     "15m": "SOL_15menit",
     "1h": "SOL_1jam",
     "1d": "SOL_1hari",
