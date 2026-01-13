@@ -6,7 +6,7 @@ import pandas as pd
 import time
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from google.oauth2 import service_account
 from pandas_gbq import read_gbq, to_gbq
 
@@ -20,17 +20,14 @@ def get_credentials():
     1. Environment variable GCP_CREDENTIALS (untuk GitHub Actions)
     2. File JSON lokal (untuk development lokal)
     """
-    # Cek apakah ada environment variable (GitHub Actions)
     gcp_creds_json = os.environ.get("GCP_CREDENTIALS")
     
     if gcp_creds_json:
-        # Parse JSON dari environment variable
         creds_dict = json.loads(gcp_creds_json)
         credentials = service_account.Credentials.from_service_account_info(creds_dict)
         print("✅ Using credentials from environment variable")
         return credentials
     
-    # Fallback ke file lokal (untuk development)
     local_file = "time-series-analysis-480002-e7649b18ed82.json"
     if os.path.exists(local_file):
         credentials = service_account.Credentials.from_service_account_file(local_file)
@@ -53,6 +50,10 @@ interval_table_map = {
     "1M": "SOL_1bulan"
 }
 
+# SOL listing date di KuCoin (Agustus 2021)
+SOL_LISTING_DATE_1M = int(datetime(2021, 8, 4, tzinfo=timezone.utc).timestamp() * 1000)
+SOL_LISTING_DATE_ALL = int(datetime(2021, 8, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
 
 # ========================
 # 2. CCXT EXCHANGE SETUP
@@ -61,18 +62,18 @@ exchange = ccxt.kucoin({"enableRateLimit": True})
 
 
 # ========================
-# 3. FETCH DATA
+# 3. FETCH HISTORICAL DATA (DARI AWAL LISTING)
 # ========================
-def fetch_interval(symbol, timeframe, since=None):
+def fetch_historical(symbol, timeframe, since):
     """
-    Fetch OHLCV data dari exchange dengan pagination.
-    Akan terus fetch sampai SEMUA data habis (data kosong).
+    Fetch SEMUA data historis dari 'since' sampai sekarang.
+    Menggunakan pagination untuk ambil jutaan data.
     """
     all_data = []
     limit = 1500
     batch_count = 0
 
-    print(f"   🔄 Starting fetch {timeframe}...")
+    print(f"   🔄 Fetching {timeframe} from {datetime.utcfromtimestamp(since/1000)}...")
     
     while True:
         try:
@@ -82,23 +83,23 @@ def fetch_interval(symbol, timeframe, since=None):
             break
 
         if not data:
-            print(f"   ✅ {timeframe} COMPLETE: {batch_count} batches, {len(all_data)} total rows")
             break
 
         batch_count += 1
         all_data.extend(data)
         
         last_timestamp = data[-1][0]
-        last_dt = datetime.utcfromtimestamp(last_timestamp / 1000)
         
-        # Progress log setiap 50 batch
-        if batch_count % 50 == 0:
-            print(f"   📦 {timeframe} Batch {batch_count}: Total {len(all_data)} rows | Last: {last_dt}")
+        # Progress log setiap 100 batch
+        if batch_count % 100 == 0:
+            last_dt = datetime.utcfromtimestamp(last_timestamp / 1000)
+            print(f"   📦 {timeframe} Batch {batch_count}: {len(all_data):,} rows | Last: {last_dt}")
 
-        # Update 'since' untuk fetch batch berikutnya
         since = last_timestamp + 1
         time.sleep(exchange.rateLimit / 1000)
 
+    print(f"   ✅ {timeframe} DONE: {batch_count} batches, {len(all_data):,} total rows")
+    
     df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
     if not df.empty:
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -109,155 +110,64 @@ def fetch_interval(symbol, timeframe, since=None):
 
 
 # ========================
-# 4. CHECK RAW DATA
+# 4. FETCH UPDATE DATA (INCREMENTAL)
 # ========================
-def check_raw_data(df, name=""):
-    print(f"\n===== CHECK RAW DATA: {name} =====")
-    print("Total rows:", len(df))
-    
-    if "timestamp" in df.columns:
-        dup_count = df.duplicated("timestamp").sum()
-        print(f"Duplicated timestamp: {dup_count}", "⚠️ WARNING!" if dup_count > 0 else "✅")
-        print("Min:", df["timestamp"].min())
-        print("Max:", df["timestamp"].max())
-
-    print("=" * 60)
-
-
-# ========================
-# 4.5 CHECK DUPLICATES IN BIGQUERY (VERIFICATION)
-# ========================
-def check_duplicates_in_bigquery():
+def fetch_update(symbol, timeframe, since):
     """
-    Fungsi untuk mengecek apakah ada duplikat di BigQuery.
-    Jalankan ini untuk verifikasi data.
+    Fetch data update dari timestamp terakhir di BigQuery.
+    Biasanya hanya beberapa rows (data baru sejak run terakhir).
     """
-    print("\n" + "="*60)
-    print("🔍 CHECKING DUPLICATES IN BIGQUERY...")
-    print("="*60)
+    all_data = []
+    limit = 1500
+
+    print(f"   🔄 Updating {timeframe} from {datetime.utcfromtimestamp(since/1000)}...")
     
-    has_duplicates = False
-    
-    for tf, table in interval_table_map.items():
-        query = f"""
-            SELECT timestamp, COUNT(*) as cnt
-            FROM `{project_id}.{dataset_id}.{table}`
-            GROUP BY timestamp
-            HAVING cnt > 1
-            LIMIT 10
-        """
-        
+    while True:
         try:
-            df = read_gbq(query, project_id=project_id, credentials=credentials)
-            if not df.empty:
-                print(f"❌ {tf} ({table}): FOUND {len(df)} duplicate timestamps!")
-                print(df.head())
-                has_duplicates = True
-            else:
-                print(f"✅ {tf} ({table}): No duplicates")
+            data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
         except Exception as e:
-            print(f"⚠️ {tf} ({table}): Cannot check - {e}")
+            print(f"   ❌ Error fetching {timeframe}: {e}")
+            break
+
+        if not data:
+            break
+
+        all_data.extend(data)
+        last_timestamp = data[-1][0]
+        since = last_timestamp + 1
+        time.sleep(exchange.rateLimit / 1000)
+
+    print(f"   ✅ {timeframe} Update: {len(all_data)} new rows")
     
-    if has_duplicates:
-        print("\n⚠️ DUPLICATES FOUND! Run cleanup if needed.")
-    else:
-        print("\n✅ ALL TABLES ARE CLEAN - No duplicates!")
-    
-    print("="*60 + "\n")
-    return not has_duplicates
+    df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    if not df.empty:
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df = df.drop_duplicates(subset="timestamp", keep="last")
+        df = df.sort_values("timestamp").reset_index(drop=True)
+
+    return df
 
 
 # ========================
-# 5. GET EXISTING TIMESTAMPS (FIX UTAMA)
+# 5. CHECK TABLE STATUS
 # ========================
-def get_existing_timestamps(interval, start_ts=None, end_ts=None):
+def get_table_row_count(interval):
+    """Cek jumlah rows di tabel BigQuery."""
     table = interval_table_map[interval]
-
-    where_clause = ""
-    if start_ts is not None and end_ts is not None:
-        where_clause = f"WHERE timestamp BETWEEN {start_ts} AND {end_ts}"
-    elif start_ts is not None:
-        where_clause = f"WHERE timestamp >= {start_ts}"
-
-    query = f"""
-        SELECT timestamp
-        FROM `{project_id}.{dataset_id}.{table}`
-        {where_clause}
-    """
-
+    query = f"SELECT COUNT(*) as cnt FROM `{project_id}.{dataset_id}.{table}`"
+    
     try:
         df = read_gbq(query, project_id=project_id, credentials=credentials)
-        return set(df["timestamp"].tolist()) if not df.empty else set()
+        return int(df.loc[0, "cnt"]) if not df.empty else 0
     except Exception:
-        print(f"⚠️ Table {table} belum ada / belum bisa diakses. Dianggap kosong.")
-        return set()
-
-
-# ========================
-# 6. UPLOAD (DEDUP) - TRIPLE PROTECTION
-# ========================
-def upload_df(df, interval, mode="append"):
-    """
-    Upload dataframe ke BigQuery dengan TRIPLE deduplikasi:
-    1. Drop duplicates dalam dataframe sendiri
-    2. Filter timestamp yang sudah ada di BigQuery
-    3. Final validation sebelum upload
-    """
-    table = interval_table_map[interval]
-
-    if df.empty:
-        print(f"⚠️ {interval} kosong, skip.")
         return 0
 
-    # LAYER 1: Pastikan tidak ada duplikat dalam dataframe
-    df = df.drop_duplicates(subset="timestamp", keep="last").copy()
-    
-    min_ts = df["timestamp"].min()
-    max_ts = df["timestamp"].max()
 
-    # LAYER 2: Cek timestamp yang sudah ada di BigQuery
-    print(f"   🔍 {interval}: Checking existing data in BigQuery...")
-    existing = get_existing_timestamps(interval, min_ts, max_ts)
-    
-    # Filter hanya data yang BELUM ada di BigQuery
-    df_new = df[~df["timestamp"].isin(existing)].copy()
-
-    if df_new.empty:
-        print(f"   ⏸️ {interval}: Semua {len(df)} rows sudah ada di BigQuery, skip upload.")
-        return 0
-
-    # LAYER 3: Final validation - pastikan df_new tidak ada duplikat
-    final_count = len(df_new)
-    df_new = df_new.drop_duplicates(subset="timestamp", keep="last")
-    if len(df_new) != final_count:
-        print(f"   ⚠️ Removed {final_count - len(df_new)} duplicates in final check")
-
-    # Upload ke BigQuery
-    print(f"   📤 {interval}: Uploading {len(df_new)} new rows...")
-    to_gbq(
-        df_new,
-        f"{dataset_id}.{table}",
-        project_id=project_id,
-        credentials=credentials,
-        if_exists="append",
-        api_method="load_csv"
-    )
-
-    print(f"   ✅ {interval} → {table}: {len(df_new)} rows UPLOADED")
-    print(f"      (Fetched: {len(df)}, Already in DB: {len(existing)}, New: {len(df_new)})")
-    return len(df_new)
-
-
-# ========================
-# 7. GET LAST TIMESTAMP
-# ========================
 def get_last_timestamp(interval):
+    """Ambil timestamp terakhir di tabel BigQuery."""
     table = interval_table_map[interval]
-    query = f"""
-        SELECT MAX(timestamp) AS last_ts
-        FROM `{project_id}.{dataset_id}.{table}`
-    """
-
+    query = f"SELECT MAX(timestamp) AS last_ts FROM `{project_id}.{dataset_id}.{table}`"
+    
     try:
         df = read_gbq(query, project_id=project_id, credentials=credentials)
         if df.empty or pd.isna(df.loc[0, "last_ts"]):
@@ -268,114 +178,125 @@ def get_last_timestamp(interval):
 
 
 # ========================
-# 8. FETCH UPDATE (OPTIMIZED)
+# 6. UPLOAD TO BIGQUERY (WITH DEDUP)
 # ========================
-# SOL listing date di KuCoin (Agustus 2021)
-SOL_LISTING_DATE_1M = int(datetime(2021, 8, 4).timestamp() * 1000)  # Untuk 1m
-SOL_LISTING_DATE_ALL = int(datetime(2021, 8, 1).timestamp() * 1000)  # Untuk interval lainnya
+def upload_df(df, interval):
+    """Upload dataframe ke BigQuery dengan deduplikasi."""
+    table = interval_table_map[interval]
 
+    if df.empty:
+        print(f"   ⚠️ {interval}: No data to upload")
+        return 0
 
-def fetch_sol_updates():
-    """
-    Fetch data terbaru untuk semua interval.
-    Mengambil dari last_timestamp yang ada di BigQuery + 1.
-    Jika tabel kosong, akan fetch dari awal listing SOL di KuCoin.
-    """
-    result = {}
+    # Deduplicate
+    df = df.drop_duplicates(subset="timestamp", keep="last").copy()
     
-    for tf in interval_table_map:
-        last_ts = get_last_timestamp(tf)
-        
-        if last_ts:
-            # Jika sudah ada data, ambil dari timestamp terakhir + 1
-            since = last_ts + 1
-            print(f"📊 {tf}: Fetching updates since {datetime.utcfromtimestamp(since/1000)}")
-        else:
-            # Jika tabel kosong, fetch dari awal listing SOL
-            if tf == "1m":
-                since = SOL_LISTING_DATE_1M  # 4 Agustus 2021 untuk 1m
-            else:
-                since = SOL_LISTING_DATE_ALL  # 1 Agustus 2021 untuk lainnya
-            print(f"📊 {tf}: Table empty, fetching ALL historical data since {datetime.utcfromtimestamp(since/1000)}...")
-        
-        result[tf] = fetch_interval("SOL/USDT", tf, since)
-    
-    return result
+    min_ts = df["timestamp"].min()
+    max_ts = df["timestamp"].max()
+
+    # Cek existing timestamps di BigQuery
+    try:
+        query = f"""
+            SELECT timestamp FROM `{project_id}.{dataset_id}.{table}`
+            WHERE timestamp BETWEEN {min_ts} AND {max_ts}
+        """
+        existing_df = read_gbq(query, project_id=project_id, credentials=credentials)
+        existing = set(existing_df["timestamp"].tolist()) if not existing_df.empty else set()
+    except Exception:
+        existing = set()
+
+    # Filter hanya yang baru
+    df_new = df[~df["timestamp"].isin(existing)].copy()
+
+    if df_new.empty:
+        print(f"   ⏸️ {interval}: All data already exists, skip")
+        return 0
+
+    # Upload
+    print(f"   📤 {interval}: Uploading {len(df_new):,} rows...")
+    to_gbq(
+        df_new,
+        f"{dataset_id}.{table}",
+        project_id=project_id,
+        credentials=credentials,
+        if_exists="append",
+        api_method="load_csv"
+    )
+
+    print(f"   ✅ {interval}: {len(df_new):,} rows uploaded")
+    return len(df_new)
 
 
 # ========================
-# 9. SINGLE RUN FOR GITHUB ACTIONS
+# 7. MAIN PIPELINE
 # ========================
-def run_single_update():
+def run_pipeline():
     """
-    Fungsi utama untuk GitHub Actions.
-    Dijalankan sekali setiap cron trigger (misal setiap 15 menit).
-    
-    LOGIKA:
-    - Run pertama: Tabel kosong → fetch semua data historis dari awal listing
-    - Run berikutnya: Ada data → fetch hanya data baru setelah timestamp terakhir
+    Pipeline utama:
+    - Jika tabel KOSONG → fetch SEMUA data historis dari awal listing (2021)
+    - Jika tabel ADA DATA → fetch hanya data UPDATE (dari timestamp terakhir)
     """
-    print(f"\n{'='*60}")
-    print(f"🚀 SOL DATA FETCH - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    print(f"{'='*60}")
-    
-    # Cek status tabel sebelum fetch
-    print("\n📋 STATUS TABEL BIGQUERY:")
-    is_first_run = True
-    for tf in interval_table_map:
-        last_ts = get_last_timestamp(tf)
-        if last_ts:
-            is_first_run = False
-            last_dt = datetime.utcfromtimestamp(last_ts / 1000)
-            print(f"   {tf}: Last data = {last_dt}")
-        else:
-            print(f"   {tf}: KOSONG (akan fetch historis)")
-    
-    if is_first_run:
-        print("\n⚠️ FIRST RUN DETECTED - Akan fetch SEMUA data historis!")
-        print("   Ini mungkin memakan waktu beberapa menit...\n")
-    else:
-        print("\n✅ UPDATE MODE - Hanya fetch data baru\n")
+    print(f"\n{'='*70}")
+    print(f"🚀 SOL DATA PIPELINE - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"{'='*70}")
     
     start_time = time.time()
     total_uploaded = 0
-    upload_summary = {}
+    summary = {}
     
-    # Fetch data untuk semua interval
-    data = fetch_sol_updates()
+    # Cek status semua tabel
+    print("\n📋 TABLE STATUS:")
+    tables_empty = {}
+    for tf in interval_table_map:
+        count = get_table_row_count(tf)
+        tables_empty[tf] = (count == 0)
+        status = "❌ EMPTY" if count == 0 else f"✅ {count:,} rows"
+        print(f"   {tf}: {status}")
     
-    # Upload masing-masing interval
-    for tf, df in data.items():
+    # Process setiap interval
+    for tf in interval_table_map:
+        print(f"\n{'─'*50}")
+        print(f"📊 Processing {tf}...")
+        
+        if tables_empty[tf]:
+            # TABEL KOSONG → Fetch semua data historis
+            print(f"   Mode: HISTORICAL (full fetch from listing date)")
+            if tf == "1m":
+                since = SOL_LISTING_DATE_1M
+            else:
+                since = SOL_LISTING_DATE_ALL
+            
+            df = fetch_historical("SOL/USDT", tf, since)
+        else:
+            # TABEL ADA DATA → Fetch update saja
+            print(f"   Mode: UPDATE (incremental)")
+            last_ts = get_last_timestamp(tf)
+            since = last_ts + 1
+            df = fetch_update("SOL/USDT", tf, since)
+        
+        # Upload ke BigQuery
         if not df.empty:
-            check_raw_data(df, tf)
-            rows_fetched = len(df)
             uploaded = upload_df(df, tf)
-            upload_summary[tf] = {"fetched": rows_fetched, "uploaded": uploaded}
+            summary[tf] = {"fetched": len(df), "uploaded": uploaded}
             total_uploaded += uploaded
         else:
-            print(f"⚠️ {tf}: No new data fetched")
-            upload_summary[tf] = {"fetched": 0, "uploaded": 0}
+            summary[tf] = {"fetched": 0, "uploaded": 0}
     
+    # Final summary
     elapsed = time.time() - start_time
-    
-    # Summary
-    print(f"\n{'='*60}")
-    print(f"📊 UPLOAD SUMMARY:")
-    for tf, stats in upload_summary.items():
+    print(f"\n{'='*70}")
+    print(f"📊 FINAL SUMMARY:")
+    for tf, stats in summary.items():
         status = "✅" if stats["uploaded"] > 0 else "⏸️"
-        print(f"   {status} {tf}: {stats['uploaded']} uploaded (fetched: {stats['fetched']})")
-    print(f"{'='*60}")
-    print(f"✅ COMPLETED in {elapsed:.2f}s")
-    print(f"📈 Total rows uploaded: {total_uploaded}")
-    print(f"{'='*60}\n")
-    
-    # Verifikasi tidak ada duplikat (opsional, uncomment jika mau cek)
-    # check_duplicates_in_bigquery()
+        print(f"   {status} {tf}: {stats['uploaded']:,} uploaded (fetched: {stats['fetched']:,})")
+    print(f"{'='*70}")
+    print(f"⏱️ Total time: {elapsed:.2f}s")
+    print(f"📈 Total uploaded: {total_uploaded:,} rows")
+    print(f"{'='*70}\n")
 
 
 # ========================
 # RUN
 # ========================
 if __name__ == "__main__":
-    # Single run untuk GitHub Actions (bukan loop)
-    run_single_update()
+    run_pipeline()

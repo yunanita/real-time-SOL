@@ -1,133 +1,98 @@
-# Real-Time SOL Data Pipeline 📊
+# 📈 Real-Time Solana (SOL) Price Data Pipeline
 
-Analisis Real Time Prediksi Harga Solana - Otomatis fetch data menggunakan GitHub Actions.
+Automated data pipeline untuk mengumpulkan data harga Solana (SOL/USDT) secara real-time dari exchange KuCoin dan menyimpannya ke Google BigQuery.
 
-## 🎯 Deskripsi
+## 🎯 Deskripsi Project
 
-Project ini mengambil data historis dan real-time harga Solana (SOL/USDT) dari exchange KuCoin menggunakan library CCXT, lalu menyimpannya ke Google BigQuery. Proses berjalan otomatis setiap **15 menit** menggunakan GitHub Actions.
+Project ini merupakan tugas UAS mata kuliah **Analisis Runtun Waktu** yang bertujuan untuk:
 
-### Data yang dikumpulkan:
+- Mengumpulkan data historis harga SOL dari awal listing (Agustus 2021) sampai sekarang
+- Melakukan update data secara otomatis setiap 15 menit menggunakan GitHub Actions
+- Menyimpan data ke Google BigQuery untuk analisis time series lebih lanjut
 
-| Interval | Tabel BigQuery |
-| -------- | -------------- |
-| 1 menit  | SOL_1menit     |
-| 15 menit | SOL_15menit    |
-| 1 jam    | SOL_1jam       |
-| 1 hari   | SOL_1hari      |
-| 1 bulan  | SOL_1bulan     |
+## 📊 Data yang Dikumpulkan
 
----
+| Interval | Tabel BigQuery | Deskripsi                             |
+| -------- | -------------- | ------------------------------------- |
+| 1 menit  | `SOL_1menit`   | Data candle per menit (~2+ juta rows) |
+| 15 menit | `SOL_15menit`  | Data candle per 15 menit              |
+| 1 jam    | `SOL_1jam`     | Data candle per jam                   |
+| 1 hari   | `SOL_1hari`    | Data candle harian                    |
+| 1 bulan  | `SOL_1bulan`   | Data candle bulanan                   |
 
-## 🚀 Cara Setup GitHub Actions
+### Kolom Data (OHLCV)
 
-### 1. Fork/Clone Repository ini
+- `timestamp` - Unix timestamp dalam milliseconds
+- `datetime` - Tanggal dan waktu (UTC)
+- `open` - Harga pembukaan
+- `high` - Harga tertinggi
+- `low` - Harga terendah
+- `close` - Harga penutupan
+- `volume` - Volume perdagangan
 
-### 2. Setup Google Cloud Credentials di GitHub Secrets
-
-1. Buka repository di GitHub
-2. Pergi ke **Settings** → **Secrets and variables** → **Actions**
-3. Klik **New repository secret**
-4. Isi:
-
-   - **Name**: `GCP_CREDENTIALS`
-   - **Secret**: Copy-paste **SELURUH ISI** file `time-series-analysis-480002-e7649b18ed82.json`
-
-   ⚠️ **PENTING**: Copy seluruh isi JSON termasuk kurung kurawal `{ }`, seperti:
-
-   ```json
-   {
-     "type": "service_account",
-     "project_id": "time-series-analysis-480002",
-     "private_key_id": "...",
-     "private_key": "-----BEGIN PRIVATE KEY-----\n...",
-     ...
-   }
-   ```
-
-5. Klik **Add secret**
-
-### 3. Enable GitHub Actions
-
-1. Pergi ke tab **Actions** di repository
-2. Klik **I understand my workflows, go ahead and enable them**
-3. Workflow akan berjalan otomatis setiap 15 menit
-
-### 4. (Opsional) Jalankan Manual
-
-Untuk test atau menjalankan manual:
-
-1. Pergi ke tab **Actions**
-2. Pilih workflow **Fetch SOL Data**
-3. Klik **Run workflow** → **Run workflow**
-
----
-
-## 📁 Struktur File
+## ⚙️ Cara Kerja Pipeline
 
 ```
+┌─────────────────────────────────────────────────────────────┐
+│  RUN PERTAMA (Tabel Kosong)                                 │
+│  ─────────────────────────────────────────────────────────  │
+│  • Mendeteksi tabel BigQuery kosong                         │
+│  • Fetch SEMUA data historis dari listing (Aug 2021)        │
+│  • Upload jutaan rows ke BigQuery                           │
+│  • Waktu: ~10-30 menit                                      │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│  RUN SELANJUTNYA (Tabel Ada Data)                           │
+│  ─────────────────────────────────────────────────────────  │
+│  • Cek timestamp terakhir di BigQuery                       │
+│  • Fetch hanya data BARU (incremental update)               │
+│  • Upload dengan deduplikasi                                │
+│  • Waktu: ~30 detik                                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## 🛠️ Tech Stack
+
+- **Data Source**: KuCoin Exchange via CCXT library
+- **Storage**: Google BigQuery
+- **Automation**: GitHub Actions (Cron setiap 15 menit)
+- **Language**: Python 3.11
+
+## 📁 Struktur Project
+
+```
+real-time-SOL/
 ├── .github/
 │   └── workflows/
-│       └── fetch-data.yml    # GitHub Actions workflow (cron setiap 15 menit)
-├── fetch.py                   # Script utama untuk fetch data
+│       └── fetch-data.yml    # GitHub Actions workflow
+├── fetch.py                   # Script utama pipeline
 ├── requirements.txt           # Python dependencies
-├── README.md                  # Dokumentasi ini
-└── *.json                     # (JANGAN COMMIT!) Credentials file - simpan di GitHub Secrets
+├── README.md                  # Dokumentasi (file ini)
+└── .gitignore                 # Ignore credentials
 ```
-
----
-
-## ⚙️ Cara Kerja
-
-1. **GitHub Actions** trigger workflow setiap 15 menit
-2. Script membaca **credentials dari environment variable** `GCP_CREDENTIALS`
-3. Untuk setiap interval (5m, 15m, 1h, 1d, 1M):
-   - Cek timestamp terakhir di BigQuery
-   - Fetch data baru dari exchange (setelah timestamp terakhir)
-   - Upload data baru ke BigQuery (dengan deduplikasi)
-4. Script selesai, tidak ada loop infinite
-
----
 
 ## 🔒 Keamanan
 
-- **JANGAN** commit file JSON credentials ke repository
-- Selalu gunakan **GitHub Secrets** untuk menyimpan credentials
-- Tambahkan `*.json` ke `.gitignore`
+- Credentials Google Cloud disimpan sebagai GitHub Secrets
+- File JSON credentials tidak di-commit ke repository
 
----
+## 📈 BigQuery Schema
 
-## 🛠️ Development Lokal
+```sql
+-- Project: time-series-analysis-480002
+-- Dataset: SOL
+-- Tables: SOL_1menit, SOL_15menit, SOL_1jam, SOL_1hari, SOL_1bulan
 
-Jika ingin menjalankan di lokal untuk testing:
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Jalankan script (pastikan file JSON ada di folder yang sama)
-python fetch.py
+SELECT * FROM `time-series-analysis-480002.SOL.SOL_1menit`
+ORDER BY timestamp DESC
+LIMIT 100
 ```
 
-Script akan otomatis mendeteksi file JSON lokal jika environment variable tidak ada.
+## 👩‍🎓 Author
 
----
+**Novia** - Tugas UAS Analisis Runtun Waktu (Semester 5)
 
-## 📝 Catatan Penting
+## 📄 License
 
-1. **GitHub Actions Free Tier**: 2000 menit/bulan untuk repository private, unlimited untuk public
-2. **Cron tidak selalu tepat waktu**: GitHub Actions cron bisa delay 5-15 menit saat traffic tinggi
-3. **Data tidak duplikat**: Script sudah handle deduplikasi berdasarkan timestamp
-
----
-
-## 📊 BigQuery Setup
-
-Pastikan sudah membuat dataset `SOL` di BigQuery dengan tabel-tabel:
-
-- `SOL_1menit`
-- `SOL_15menit`
-- `SOL_1jam`
-- `SOL_1hari`
-- `SOL_1bulan`
-
-Tabel akan otomatis terisi saat script pertama kali dijalankan.
+Project ini dibuat untuk keperluan akademis.
