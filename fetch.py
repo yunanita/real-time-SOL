@@ -66,12 +66,10 @@ exchange = ccxt.kucoin({"enableRateLimit": True})
 def fetch_interval(symbol, timeframe, since=None):
     """
     Fetch OHLCV data dari exchange dengan pagination.
-    Akan terus fetch sampai SEMUA data dari 'since' sampai sekarang.
-    Jika since=None, fetch dari awal listing (bisa jutaan rows).
+    Akan terus fetch sampai SEMUA data habis (data kosong).
     """
     all_data = []
-    limit = 1500  # Max per request dari KuCoin
-    seen_timestamps = set()  # Track timestamp untuk hindari duplikat
+    limit = 1500
     batch_count = 0
 
     print(f"   🔄 Starting fetch {timeframe}...")
@@ -84,31 +82,18 @@ def fetch_interval(symbol, timeframe, since=None):
             break
 
         if not data:
-            print(f"   📭 No more data for {timeframe}")
+            print(f"   ✅ {timeframe} COMPLETE: {batch_count} batches, {len(all_data)} total rows")
             break
 
         batch_count += 1
+        all_data.extend(data)
         
-        # Filter duplikat saat fetch (layer 1)
-        new_in_batch = 0
-        for candle in data:
-            ts = candle[0]
-            if ts not in seen_timestamps:
-                seen_timestamps.add(ts)
-                all_data.append(candle)
-                new_in_batch += 1
-
         last_timestamp = data[-1][0]
         last_dt = datetime.utcfromtimestamp(last_timestamp / 1000)
         
-        # Progress log setiap 10 batch
-        if batch_count % 10 == 0 or len(data) < limit:
-            print(f"   📦 {timeframe} Batch {batch_count}: +{new_in_batch} rows | Total: {len(all_data)} | Last: {last_dt}")
-
-        # Jika data yang didapat kurang dari limit, berarti sudah sampai akhir
-        if len(data) < limit:
-            print(f"   ✅ {timeframe} COMPLETE: {batch_count} batches, {len(all_data)} total rows")
-            break
+        # Progress log setiap 50 batch
+        if batch_count % 50 == 0:
+            print(f"   📦 {timeframe} Batch {batch_count}: Total {len(all_data)} rows | Last: {last_dt}")
 
         # Update 'since' untuk fetch batch berikutnya
         since = last_timestamp + 1
@@ -117,12 +102,7 @@ def fetch_interval(symbol, timeframe, since=None):
     df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
     if not df.empty:
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-        # Layer 2: Drop duplicates (safety net)
-        before_dedup = len(df)
         df = df.drop_duplicates(subset="timestamp", keep="last")
-        after_dedup = len(df)
-        if before_dedup != after_dedup:
-            print(f"   ⚠️ Removed {before_dedup - after_dedup} duplicates during fetch")
         df = df.sort_values("timestamp").reset_index(drop=True)
 
     return df
@@ -290,13 +270,19 @@ def get_last_timestamp(interval):
 # ========================
 # 8. FETCH UPDATE (OPTIMIZED)
 # ========================
+# SOL listing date di KuCoin (Agustus 2021)
+SOL_LISTING_DATE_1M = int(datetime(2021, 8, 4).timestamp() * 1000)  # Untuk 1m
+SOL_LISTING_DATE_ALL = int(datetime(2021, 8, 1).timestamp() * 1000)  # Untuk interval lainnya
+
+
 def fetch_sol_updates():
     """
     Fetch data terbaru untuk semua interval.
     Mengambil dari last_timestamp yang ada di BigQuery + 1.
-    Jika tabel kosong, akan fetch dari awal (sejak listing).
+    Jika tabel kosong, akan fetch dari awal listing SOL di KuCoin.
     """
     result = {}
+    
     for tf in interval_table_map:
         last_ts = get_last_timestamp(tf)
         
@@ -305,9 +291,12 @@ def fetch_sol_updates():
             since = last_ts + 1
             print(f"📊 {tf}: Fetching updates since {datetime.utcfromtimestamp(since/1000)}")
         else:
-            # Jika tabel kosong, fetch dari awal (None = dari awal listing)
-            since = None
-            print(f"📊 {tf}: Table empty, fetching historical data from beginning...")
+            # Jika tabel kosong, fetch dari awal listing SOL
+            if tf == "1m":
+                since = SOL_LISTING_DATE_1M  # 4 Agustus 2021 untuk 1m
+            else:
+                since = SOL_LISTING_DATE_ALL  # 1 Agustus 2021 untuk lainnya
+            print(f"📊 {tf}: Table empty, fetching ALL historical data since {datetime.utcfromtimestamp(since/1000)}...")
         
         result[tf] = fetch_interval("SOL/USDT", tf, since)
     
