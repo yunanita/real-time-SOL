@@ -1,0 +1,51 @@
+name: ARIMAX 1 Menit Prediction
+
+on:
+  # Cron job - jalan tiap 1 menit untuk testing
+  schedule:
+    - cron: "0 0,6,12,18 * * *" # Setiap hari jam 07:00, 13:00, 19:00, 01:00 WIB (00:00, 06:00, 12:00, 18:00 UTC)
+
+  # Manual trigger dari GitHub UI
+  workflow_dispatch:
+
+  # Trigger saat push ke main (optional, untuk testing)
+  push:
+    branches: [main]
+    paths:
+      - "arimax_1menit.py"
+      - ".github/workflows/arimax_1menit.yml"
+
+jobs:
+  run-prediction:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy matplotlib pytz
+          pip install google-cloud-bigquery google-auth
+          pip install statsmodels scikit-learn db-dtypes
+
+      - name: Create credentials file
+        run: |
+          echo '${{ secrets.GCP_CREDS }}' > /tmp/gcp-key.json
+
+      - name: Run ARIMAX prediction
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp-key.json
+        run: |
+          python arimax_1menit.py
+
+      - name: Clean up credentials
+        if: always()
+        run: |
+          rm -f /tmp/gcp-key.json
