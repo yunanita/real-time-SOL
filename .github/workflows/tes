@@ -1,0 +1,10 @@
+name: Test Schedule Only
+on:
+  schedule:
+    - cron: '*/1 * * * *'
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "schedule ${{ github.event_name }}"
